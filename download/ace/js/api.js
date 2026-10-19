@@ -64,12 +64,28 @@ window.Ace = window.Ace || {};
     if (e.kind === "auth") return "That Z.ai API key looks invalid or expired. Update it in Settings.";
     if (e.kind === "rate") return "Z.ai servers are busy — give it a couple of seconds and try again.";
     if (e.kind === "unknown-model") return "That model isn't available on your key — Ace fell back to the free model.";
+    if (e.kind === "network")
+      return "The connection to Z.ai dropped — long builds stream for 1-3 minutes and school wifi sometimes cuts in. Everything streamed so far is saved; hit Retry and Ace picks up where it left off.";
     if (/Failed to fetch|NetworkError|network/i.test(e.message || ""))
       return "Can't reach api.z.ai — check the school wifi/firewall or your connection.";
     return e.message || "Something went wrong.";
   };
 
-  /* ---------- low-level request (with 1 polite retry on 429) ---------- */
+  /* abort-aware sleep (Stop button stays responsive during backoffs) */
+  function sleep(ms, signal) {
+    return new Promise((resolve, reject) => {
+      const t = setTimeout(() => resolve(), ms);
+      if (signal) signal.addEventListener("abort", () => {
+        clearTimeout(t);
+        const e = new Error("aborted"); e.name = "AbortError"; reject(e);
+      }, { once: true });
+    });
+  }
+
+  /* ---------- low-level request ----------
+     Network resilience (school wifi cuts connections at random):
+     • 3 connection attempts with backoff before giving up
+     • 429 → single polite retry after 2.2s                              */
   async function rawChat(payload, signal) {
     if (!A.key) { const e = new Error("No API key configured"); e.kind = "auth"; throw e; }
     await A.detectProxy();
@@ -80,14 +96,23 @@ window.Ace = window.Ace || {};
       body: JSON.stringify(payload),
       signal
     });
-    let res;
-    try { res = await doFetch(); } catch (err) {
-      if (err.name === "AbortError") throw err;
-      throw Object.assign(new Error("Can't reach api.z.ai — check your connection."), { kind: "network" });
+    const netErr = () => Object.assign(
+      new Error("Can't reach api.z.ai — check the school wifi/firewall or your connection."), { kind: "network" });
+
+    let res = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try { res = await doFetch(); break; }
+      catch (err) {
+        if (err.name === "AbortError") throw err;
+        if (attempt < 2) await sleep(900 * (attempt + 1), signal); // 0.9s, 1.8s backoff
+      }
     }
+    if (res === null) throw netErr();
+
     if (res.status === 429) { // brief backoff, single retry
-      await new Promise(r => setTimeout(r, 2200));
-      res = await doFetch().catch(err => { if (err.name === "AbortError") throw err; throw Object.assign(new Error("Can't reach api.z.ai — check your connection."), { kind: "network" }); });
+      await sleep(2200, signal);
+      try { res = await doFetch(); }
+      catch (err) { if (err.name === "AbortError") throw err; throw netErr(); }
     }
     if (!res.ok) throw apiError(res.status, await res.text());
     return res;
@@ -155,31 +180,45 @@ window.Ace = window.Ace || {};
     const safeDelta = guard((c, r) => opts.onDelta && opts.onDelta(c, r));
     const safeReasoning = guard((r) => opts.onReasoning && opts.onReasoning(r));
 
-    while (true) {
-      const { done: rdrDone, value } = await reader.read();
-      if (rdrDone) break;
-      buf += dec.decode(value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 1);
-        if (!line.startsWith("data:")) continue;
-        const data = line.slice(5).trim();
-        if (data === "[DONE]") continue;
-        let j; try { j = JSON.parse(data); } catch (e) { continue; }
-        const ch = j.choices && j.choices[0];
-        const d = (ch && (ch.delta || ch.message)) || {};
-        if (d.content) { content += d.content; emit(); }
-        if (d.reasoning_content) { reasoning += d.reasoning_content; safeReasoning(reasoning); }
-        // search results can arrive in several shapes depending on model
-        const sr = d.web_search || d.search_result || j.web_search || (ch && ch.message && ch.message.web_search);
-        if (Array.isArray(sr) && sr.length) sources = sr;
-        if (j.usage) usage = j.usage;
+    /* Long generations stream for 1-3 minutes; school wifi / filters
+       sometimes cut the connection mid-stream. When that happens we do NOT
+       throw away what already arrived — we return the partial text with
+       interrupted:true so the caller can resume from where it stopped. */
+    let dropped = false;
+    try {
+      while (true) {
+        const { done: rdrDone, value } = await reader.read();
+        if (rdrDone) break;
+        buf += dec.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 1);
+          if (!line.startsWith("data:")) continue;
+          const data = line.slice(5).trim();
+          if (data === "[DONE]") continue;
+          let j; try { j = JSON.parse(data); } catch (e) { continue; }
+          const ch = j.choices && j.choices[0];
+          const d = (ch && (ch.delta || ch.message)) || {};
+          if (d.content) { content += d.content; emit(); }
+          if (d.reasoning_content) { reasoning += d.reasoning_content; safeReasoning(reasoning); }
+          // search results can arrive in several shapes depending on model
+          const sr = d.web_search || d.search_result || j.web_search || (ch && ch.message && ch.message.web_search);
+          if (Array.isArray(sr) && sr.length) sources = sr;
+          if (j.usage) usage = j.usage;
+        }
       }
+    } catch (err) {
+      if (err.name === "AbortError") throw err;
+      dropped = true; // connection cut mid-response
     }
     done = true;
     emit.cancel(); // kill any pending trailing call — the stream is over
     safeDelta(content, reasoning, true);
-    return { content, reasoning, usage, sources, model, fallbackUsed: isFallback };
+    if (dropped && !content && !reasoning) {
+      const e = new Error("The connection to Z.ai dropped before any text arrived.");
+      e.kind = "network"; throw e;
+    }
+    return { content, reasoning, usage, sources, model, fallbackUsed: isFallback, interrupted: dropped };
   }
 
   /* ---------- non-streaming convenience ---------- */
@@ -355,20 +394,28 @@ window.Ace = window.Ace || {};
     const DROP = new Set(("what whats who whos when where why how which is are was were am do does did can could " +
       "will would should the a an of in on at to for from with about into over after before me you your my i " +
       "current currently latest right now today tell show give find get explain does there their it its and or " +
-      "if so than then very really just please thanks thank").split(" "));
+      "if so than then very really just please thanks thank his her hers she he they them him has have had").split(" "));
     const keep = s.split(" ").filter(w => w && !DROP.has(w.toLowerCase()));
     let out = keep.join(" ").trim();
     if (out.split(" ").length > 8) out = keep.slice(0, 8).join(" "); // cap length
     return out || s.slice(0, 80);
   }
 
-  /* ---- relevance validation: engines sometimes return junk that has
-     nothing to do with the query. A ref must mention a fair share of the
-     query keywords or it never reaches the model. ---- */
+  /* ---- relevance validation ----
+     Term-count ratios alone let "Islam the religion" pages through for
+     "Islam Makhachev record" (2 of 4 terms = 50% ≥ the bar). The fix:
+     the LONGEST query term (usually the entity name — "makhachev",
+     "iphone", "photosynthesis"...) is an ANCHOR: a relevant result must
+     mention it. Common words can never substitute for the entity. */
+  function queryTerms(query) {
+    return String(query || "").toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 2);
+  }
   function isRelevant(ref, query, minRatio) {
-    const terms = String(query || "").toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 2);
+    const terms = queryTerms(query);
     if (!terms.length) return true;
     const hay = ((ref && (ref.title + " " + ref.content)) || "").toLowerCase();
+    const anchor = terms.reduce((a, b) => (b.length > a.length ? b : a), terms[0]);
+    if (anchor.length >= 5 && !hay.includes(anchor)) return false; // entity anchor miss → junk
     let hits = 0;
     terms.forEach(t => { if (hay.includes(t)) hits++; });
     return hits >= Math.max(1, Math.ceil(terms.length * (minRatio || 0.34)));

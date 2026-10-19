@@ -1,0 +1,28 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "1) **Yes.** There is a shipped app artifact card visible with a live game preview rendered inside it.\n2) **Yes.** The game preview looks like a functioning neon-themed clicker game, featuring \"Points per Click\" and \"Points per Second\" stats and a large glowing neon button.\n3) **No.** The rendering is clean; there are no glitches, error messages, or Chinese text visible in the image.",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1792453375,
+  "id": "20261020074254974c77a87e224af7",
+  "model": "glm-5v-turbo",
+  "object": "chat.completion",
+  "request_id": "20261020074254974c77a87e224af7",
+  "usage": {
+    "completion_tokens": 90,
+    "completion_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "prompt_tokens": 967,
+    "prompt_tokens_details": {
+      "cached_tokens": 7
+    },
+    "total_tokens": 1057
+  }
+}

@@ -13,6 +13,18 @@ You ALWAYS respond in English. Every sentence, heading, list item, quiz question
 const JSON_KEY_RULE = `# JSON KEYS (absolute rule)
 All JSON keys must be EXACTLY the English keys shown in the examples — never translate them, never rename them, never invent new ones.`;
 
+/* Anti-hallucination core — the research-backed stack (grounding +
+   uncertainty admission + date anchoring). Goes into EVERY chat prompt
+   and is reinforced again at the end (start+end repetition works best). */
+const HONESTY_RULE = `# HONESTY & FACTS (anti-hallucination — absolute rules)
+Today is ${new Date().toDateString()}. Your training data has a cutoff and may be months or YEARS out of date.
+- For anything time-sensitive (records, scores, prices, releases, news, people, "current", "latest", "this year"), your memory may be stale. Unless live references (when provided) confirm it, say plainly that your info may be out of date — never present stale memory as a current fact.
+- NEVER invent numbers, dates, statistics, quotes, URLs, or sources. A confident guess presented as fact is a FAILURE. "I'm not sure — double-check this" is always the correct move.
+- If you state a factual claim you are not fully certain of, flag it inline like "(I might be misremembering — verify this)".
+- Keep what you KNOW, what you INFER, and what you're GUESSING clearly separated.`;
+
+const HONESTY_REMINDER = `Reminder (final check before you write): anything time-sensitive you can't verify against the references → say your info may be out of date. Never invent numbers, dates, quotes, URLs or sources. "I'm not sure" beats a confident guess — always.`;
+
 Ace.PROMPTS.chat = (opts) => {
   opts = opts || {};
   const p = [];
@@ -85,19 +97,7 @@ ${JSON_KEY_RULE}`);
 
   p.push(ENGLISH_RULE);
 
-  if (opts.webSearch || opts.refs) {
-    p.push(`# WEB REFERENCES (anti-hallucination protocol — follow strictly)
-Live reference material was fetched for this question (Wikipedia / DuckDuckGo / web search). ${opts.refs && opts.refs.length ? "It is included below." : "No references came back for this question."}
-Rules:
-- Ground every factual claim in the reference material below. Cite claims inline as Markdown links to the source, and end with a short "Sources:" list (Markdown links, one per line).
-- If the references don't answer the question or conflict, SAY SO plainly ("the sources I pulled don't cover this") instead of guessing.
-- If asked about current events, prices, scores, or anything time-sensitive that the references don't confirm, explicitly say you don't have live data on it and may be out of date. NEVER invent numbers, dates, headlines, or URLs.
-- Today is ${new Date().toDateString()}. Reference material may include its own dates — prefer the most recent, and mention when info looks dated.`);
-    if (opts.refs && opts.refs.length) {
-      p.push("## Reference material\n" + opts.refs.map((r, i) =>
-        `[${i + 1}] ${r.title} (${r.media}) — ${r.link}\n${r.content || ""}`.slice(0, 900)).join("\n\n"));
-    }
-  }
+  p.push(HONESTY_RULE);
 
   if (opts.memories && opts.memories.length) {
     p.push(`# WHAT YOU REMEMBER ABOUT THE USER (long-term memory)
@@ -127,6 +127,31 @@ The user attached ${opts.fileCount} file${opts.fileCount > 1 ? "s" : ""} — the
 
   p.push(`# ACADEMIC INTEGRITY (calibrate quietly)
 The goal is getting this student to genuinely pass and get into college. Give the answer AND the why. When time is tight, be fast and practical first, then teach one key insight. Offer quizzes after teaching new material. Don't lecture them about cheating — just make learning the fastest path.`);
+
+  /* Web references go at the END of the system prompt (right before the
+     final reminder): recency = attention. Mid-prompt references get
+     skipped by the model — that's how a 29-1 sitting in ref [1] turned
+     into a hallucinated "23-1" in testing. */
+  const haveRefs = opts.webSearch || opts.refs;
+  if (haveRefs) {
+    p.push(`# WEB REFERENCES (anti-hallucination protocol — follow strictly)
+Live reference material was fetched for this question (Wikipedia / DuckDuckGo / web search). ${opts.refs && opts.refs.length ? "It is included below — READ IT before answering." : "No references came back for this question."}
+Rules:
+- The references are NEWER than your training data. When they conflict with your memory, TRUST THE REFERENCES — your memory of anything recent is likely stale.
+- NUMBERS DISCIPLINE: when the answer depends on a number (records, scores, prices, dates, streaks), find that exact number IN THE REFERENCES and quote it with its source. If a number is not in the references, DO NOT write it — say you couldn't verify it. Your memory of specific numbers is UNRELIABLE; the references are the only source of truth here.
+- Same discipline for named facts (who beat whom, opponents, winners, places): if the references don't state it, leave it out — do not pad with remembered backstory.
+- Ground every factual claim in the references. Cite claims inline as Markdown links to the source, and end with a short "Sources:" list (Markdown links, one per line).
+- If the references don't answer the question or conflict, SAY SO plainly ("the sources I pulled don't cover this") instead of guessing.
+- Reference material may include its own dates — prefer the most recent, and mention when info looks dated.`);
+    if (opts.refs && opts.refs.length) {
+      p.push("## Reference material (the only source of truth for this answer)\n" + opts.refs.map((r, i) =>
+        `[${i + 1}] ${r.title} (${r.media}) — ${r.link}\n${r.content || ""}`.slice(0, 900)).join("\n\n"));
+    }
+  }
+
+  p.push(haveRefs
+    ? `Reminder (final check): every number, date and fact in your answer must be traceable to the reference material above. If it isn't in the references, don't claim it — say so instead. Your memory is stale; the references are not.`
+    : HONESTY_REMINDER);
   return p.join("\n\n");
 };
 

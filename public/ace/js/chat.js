@@ -491,8 +491,11 @@ window.Ace = window.Ace || {};
       const memories = await Ace.Memory.recall(userText).catch(() => []);
       const memHint = $("memHint"); if (memHint) memHint.textContent = memories.length ? `${memories.length} memories in context` : "";
 
+      /* Auto web-grounding: current-events / live-fact questions get real
+         references even when the Web toggle is off (the #1 hallucination
+         source is stale training data answering "current" questions). */
       const autoWeb = settings.autoWebSearch !== false && !hasImages && !hasFiles && !Ace.App.toggles.web &&
-        /\b(latest|today|right now|current|currently|news|prices?|record|score|champion)\b|\bwho won\b|\bweather\b|\b(up ?to ?date|update on)\b|\b(stock|election|released|coming out|game last night)\b|20(2[5-9]|3[0-9])/i.test(userText);
+        /\b(latest|today|tonight|right now|current(ly)?|news|prices?|record|score|champion|winner|reign)\b|\bwho (won|is|was|are|beat|plays|fought)\b|\bwho'?s (the|a|playing|winning)\b|\bhow (old|tall|many)\b|\bnet worth\b|\b(ranking|ranked|standings?|stats?|statistics)\b|\bweather\b|\b(up ?to ?date|update on|updated)\b|\b(stock|election|released|coming out|game last night|season|episode|schedule|draft|trade)\b|\b(still )?(alive|dead|retired|dating|married|together)\b|\btop \d+\b|\btrue or false\b|\b(fake|real)\b.*(news|story|video)?\s*\?|20(2[5-9]|3[0-9])/i.test(userText);
       const useWeb = Ace.App.toggles.web || autoWeb;
       const useDeep = Ace.App.toggles.deep && !hasImages;
       if (autoWeb) Ace.UI.toast("Auto web search on — this looks like a current-events question", "info");
@@ -564,6 +567,7 @@ window.Ace = window.Ace || {};
         };
         const res = await Ace.API.stream({
           model, fallbackChain: chain, taskKey: "chat", thinking,
+          temperature: 0.35, // factual-first (hallucination research: 0.1-0.4)
           messages: history, signal: (C.abort = new AbortController()).signal,
           onDelta
         });
@@ -571,6 +575,10 @@ window.Ace = window.Ace || {};
 
         ai.content = res.content; ai.reasoning = res.reasoning || "";
         ai.model = res.model; ai.fallbackUsed = res.fallbackUsed;
+        if (res.interrupted) { // connection dropped mid-answer — keep what streamed
+          ai.content += "\n\n*(the connection dropped — this answer may be cut off; tap Retry to regenerate)*";
+          ai.error = true;
+        }
         ai.streaming = false;
         ai.searchResult = (useWeb && refs.length) ? refs : null;
         finishTasks(ai);
@@ -599,7 +607,14 @@ window.Ace = window.Ace || {};
         if (ai.content && ai.content !== "*(stopped)*") await Ace.Store.addMessage(chat.id, ai);
       } else {
         ai.streaming = false; ai.error = true;
-        ai.content = `**Something went wrong.** ${Ace.esc(Ace.API.friendlyError(e))}`;
+        const partial = (ai.content || "").trim();
+        const netDrop = e.kind === "network" || /dropped/i.test(e.message || "");
+        if (partial && netDrop) {
+          // keep whatever streamed before the drop — it's usually still useful
+          ai.content = partial + "\n\n*(the connection dropped mid-answer — tap Retry to regenerate)*";
+        } else {
+          ai.content = `**Something went wrong.** ${Ace.esc(Ace.API.friendlyError(e))}`;
+        }
         C.rerenderMessage(ai);
       }
     } finally {

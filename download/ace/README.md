@@ -91,6 +91,16 @@ This makes chats/memories sync across devices and shares your API key with anyon
 - The whole app is static HTML/CSS/JS from one folder — same as any website. It talks to `api.z.ai` (CORS-enabled, verified) and `en.wikipedia.org` / `api.duckduckgo.com` for references, plus `gstatic.com` for Firebase.
 - If the school network blocks a domain, Ace degrades gracefully: no Firebase → local storage; no references → the AI says when it couldn't verify instead of guessing; no API → clear error with a retry.
 - Works on managed Chromebooks (Chrome 89+), no installs.
+- **Long builds are drop-proof**: Agent builds stream for 1–3 minutes, and school wifi sometimes cuts long connections. If that happens, Ace keeps everything that already streamed and continues the file from where it stopped (you'll see "connection hiccup, resuming" in the trace) — the build survives instead of failing. Connection attempts also auto-retry 3× with backoff before any error is shown.
+
+---
+
+## 🧠 Anti-hallucination (how Ace stays honest)
+
+- Factual/current-events questions get **real web references** automatically (even with the Web toggle off) — Wikipedia, DuckDuckGo, Bing and news, junk-filtered with an entity-anchor check so off-topic pages never reach the model.
+- References sit at the **end of the system prompt** with a numbers-discipline rule: every number/named fact must be traceable to a reference, or Ace says it couldn't verify it.
+- **Temperature 0.35** for factual answers (research-backed hallucination reduction), plus honesty rules with today's date so the model knows when its memory is stale.
+- If references come back empty, Ace tells you it may be out of date instead of guessing — no invented numbers, dates, or URLs.
 
 ---
 

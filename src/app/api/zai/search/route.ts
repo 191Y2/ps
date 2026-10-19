@@ -27,7 +27,7 @@ function cleanQuery(q) {
   const DROP = new Set(("what whats who whos when where why how which is are was were am do does did can could " +
     "will would should the a an of in on at to for from with about into over after before me you your my i " +
     "current currently latest right now today tell show give find get explain does there their it its and or " +
-    "if so than then very really just please thanks thank").split(" "));
+    "if so than then very really just please thanks thank his her hers she he they them him has have had").split(" "));
   const keep = s.split(" ").filter((w) => w && !DROP.has(w.toLowerCase()));
   let out = keep.join(" ").trim();
   if (out.split(" ").length > 8) out = keep.slice(0, 8).join(" ");
@@ -200,13 +200,18 @@ function safeHost(link) {
 }
 
 /* Relevance validation — engines sometimes return cached junk that has
-   NOTHING to do with the query (Bing RSS has degraded badly). A ref must
-   mention a fair share of the query's keywords or it's dropped. */
+   NOTHING to do with the query (Bing RSS has degraded badly). Term-count
+   ratios alone let "Islam the religion" pages through for "Islam Makhachev
+   record" (islam+record = 2/4 terms). The fix: the LONGEST query term
+   (usually the entity name) is an ANCHOR — a relevant result MUST mention
+   it. Common words can never substitute for the entity. */
 function isRelevant(ref: any, query: string, minRatio = 0.34) {
   const terms = String(query || "").toLowerCase().split(/[^a-z0-9]+/)
     .filter((w) => w.length > 2);
   if (!terms.length) return true;
   const hay = ((ref?.title || "") + " " + (ref?.content || "")).toLowerCase();
+  const anchor = terms.reduce((a, b) => (b.length > a.length ? b : a), terms[0]);
+  if (anchor.length >= 5 && !hay.includes(anchor)) return false; // entity anchor miss
   let hits = 0;
   for (const t of terms) if (hay.includes(t)) hits++;
   return hits >= Math.max(1, Math.ceil(terms.length * minRatio));

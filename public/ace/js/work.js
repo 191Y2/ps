@@ -296,7 +296,7 @@ window.Ace = window.Ace || {};
         let full = "";
         const buildT0 = Date.now();
         let lastLive = 0;
-        const res = await Ace.API.stream({
+        const doBuildStream = () => Ace.API.stream({
           model: Ace.ROUTE.work, fallbackChain: Ace.chainFor(Ace.ROUTE.work, "work"), taskKey: "work",
           temperature: 0.55, maxTokens: 16000, signal,
           messages: [{ role: "user", content: buildPrompt }],
@@ -312,19 +312,41 @@ window.Ace = window.Ace || {};
             updateLive(ai, buildK, label, "", content);
           }
         });
-        code = extractHTML(res.content);
-        ai.model = res.model;
+        /* Builds stream for 1-3 minutes and school wifi / filters sometimes
+           cut the connection mid-file. NEVER lose the build: if the stream
+           drops, whatever already streamed is kept and the file continues
+           from its tail (resumable builder). rawChat already retried the
+           connection 3x, so a throw here with zero text is a real failure. */
+        let res = null;
+        try { res = await doBuildStream(); }
+        catch (e) {
+          if (e.name === "AbortError" || !full.trim()) throw e;
+          step(ai, buildK, `Building v${v} — connection hiccup, resuming from the ${fmtKB(full.length)} already written`,
+            { state: "run", showCode: true, live: "resuming where it stopped…" });
+        }
+        if (res && res.content) full = res.content;
+        code = extractHTML(full);
+        ai.model = (res && res.model) || ai.model;
 
-        // truncated output? ask the model to continue FROM WHERE IT STOPPED
+        // incomplete or dropped? continue the file FROM WHERE IT STOPPED
         let continues = 0;
-        while (!code && continues < 2) {
+        while (!code && continues < 3) {
           continues++;
-          step(ai, buildK, `Building v${v} — file was cut off, continuing (part ${continues + 1})`, { state: "run", showCode: true, live: "continuing…" });
+          step(ai, buildK, `Building v${v} — ${res && res.interrupted ? "connection dropped, " : ""}continuing the file (part ${continues + 1})`, { state: "run", showCode: true, live: "continuing…" });
           const tail = full.slice(-7000);
-          const c = await callModel(
-            "Here is the END of the HTML file you were writing (it got cut off):\n\n```html\n" + tail + "\n```\n\nContinue the file EXACTLY where it stops — do not repeat any earlier code, do not restart, just output the continuation until `</html>`.",
-            null, 0.55, 16000, signal);
-          full += "\n" + c.content;
+          let part = "";
+          try {
+            const c = await callModel(
+              "Here is the END of the HTML file you were writing (it got cut off):\n\n```html\n" + tail + "\n```\n\nContinue the file EXACTLY where it stops — do not repeat any earlier code, do not restart, just output the continuation until `</html>`. If the file is already complete, output just `</html>`.",
+              null, 0.55, 16000, signal);
+            part = c.content || "";
+          } catch (e) {
+            if (e.name === "AbortError") throw e;
+            if (continues >= 3) throw e; // surface the real network error
+            // else: one more continuation attempt (transient blip)
+          }
+          if (!part.trim()) continue;
+          full += "\n" + part;
           code = extractHTML(full);
         }
         if (!code) throw new Error("The builder didn't return a complete HTML file — try rephrasing what you want.");
