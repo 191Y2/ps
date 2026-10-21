@@ -11,6 +11,10 @@ const nextConfig: NextConfig = {
   eslint: {
     ignoreDuringBuilds: true,
   },
+  // FORCES NEXT.JS TO BYPASS MISSING SERVER VARIABLES OR API ROUTE ERRORS DURING STATIC EXPORT
+  experimental: {
+    missingSuspenseWithCSRBypass: true,
+  },
   reactStrictMode: false,
 };
 
