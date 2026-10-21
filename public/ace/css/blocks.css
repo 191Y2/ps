@@ -88,9 +88,9 @@
 }
 .blk-opt.sel .blk-opt-mark { border-color: var(--accent); background: var(--accent); }
 .blk-opt.right .blk-opt-mark { border-color: var(--ok); background: var(--ok); }
-.blk-opt.right .blk-opt-mark::after { content: "✓"; color: #06251a; font-weight: 800; }
+.blk-opt.right .blk-opt-mark svg { position: relative; display: block; }
 .blk-opt.wrong .blk-opt-mark { border-color: var(--danger); background: var(--danger); }
-.blk-opt.wrong .blk-opt-mark::after { content: "✗"; color: #2b090d; font-weight: 800; }
+.blk-opt.wrong .blk-opt-mark svg { position: relative; display: block; }
 .blk-opt-multi .blk-opt-mark { border-radius: 6px; }
 .blk-input {
   width: 100%; background: var(--bg); border: 1.5px solid var(--border-2); border-radius: 12px;

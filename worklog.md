@@ -83,3 +83,35 @@ Stage Summary:
 - Hallucination fixed the research-backed way: auto-grounding with entity-anchored junk filtering + refs-at-end prompt + numbers discipline + date-anchored honesty rules + temp 0.35. Verified: real records/prices from live sources, honest "can't verify" instead of invented numbers (3/3 CLI, 2/2 browser tests).
 - "Can't reach api.z.ai" build crash fixed: builds are now resumable across connection drops (partial content kept, file continues from tail), connections retry 3× with backoff, errors only surface after exhaustion with an honest message. User's exact failing request now ships end-to-end.
 - Deliverables: /home/z/my-project/download/ace/ + ace.zip; live preview at the Next.js root (/ace/index.html); unit + production-prompt + browser E2E suites all green.
+
+---
+Task ID: 5
+Agent: main (Z.ai GLM)
+Task: Round-5 fix per user bug report: "this isn't static so it doesn't work in GitHub io — check every file, ensure everything works, double-check the static 100% GitHub working".
+
+Work Log:
+- Read back ALL 19 files (13 JS + 2 CSS + index.html + README + public copy) and audited every network call, path, and API.
+- ROOT CAUSE of the GitHub Pages failure (proven with in-browser fetch tests): api.z.ai's CORS preflight (OPTIONS) returns NO Access-Control-Allow-Origin — 0/15 probes. Browsers block every direct call ("Failed to fetch" → the app's "Can't reach api.z.ai" error). It only ever worked on the Next.js preview because the same-origin /api/zai/* proxy existed there — the browser-direct path had never truly run.
+- Endpoint probe matrix: open.bigmodel.cn works from the browser but is DUAL-STACK and broken on IPv6 (IPv4 path passes preflight ~30-50%, IPv6 path 0/8) — browsers stick to IPv6 per-origin, causing the intermittent cold-start failures observed during testing. api.z.ai coding endpoint: broken. Query-param auth: unsupported (error 1001).
+- FINAL SOLUTION: bigmodel.cn (apex domain) is IPv4-ONLY, serves the exact same GLM API with the same key (verified non-stream, stream, thinking), and passes the CORS preflight 100% (16/16 probes). New endpoint list: bigmodel.cn/api/paas/v4 (primary), bigmodel.cn/api/coding/paas/v4, open.bigmodel.cn × 2 as deep fallbacks, rotated last-good-first.
+- api.js: rawChat rewritten — up to 12 connect attempts alternating gateways with short backoffs (proxy mode keeps 3); sticky last-good gateway; 429 retry on the gateway that connected; NEW A.warm() — silent ~20-token boot-time request that wins the flaky-preflight lottery while the user types (browser caches a won preflight for 1h); warm() hooked into boot + Settings key-save.
+- Search hardening: CORS proxies now raced in parallel (Promise.any) — a dead proxy costs its timeout once (~9s) instead of stacking (18s); allorigins was down during testing and search still produced grounded, honest answers from Wikipedia + DDG.
+- Agent-mode intent guard: planner prompt now outputs {"type":"none"} for non-build requests; work.js detects it, drops the agent placeholder, and answers via the normal chat pipeline (exported C.runCompletion). Question-in-Agent-mode no longer triggers a phantom build. Also fixed the planner copying the prompt's "Snake XR" example verbatim for unrelated requests (dice roller → planned Snake XR) — added explicit anti-example-copy instruction; retest plans correctly.
+- prompts.js: quick-answer rule ("just the answer" → no quiz/cards).
+- blocks.js + blocks.css: quiz answer marks converted from CSS ✓/✗ text symbols to SVG icons (last remaining emoji-like glyphs in the UI).
+- index.html: cache-busting ?v=1.1.7 on all scripts/styles (GitHub Pages 10-min cache made stale-JS confusion possible on updates); .nojekyll added to the deploy folder.
+- README: rewritten deploy section (deploy ONLY the ace folder, .nojekyll explained), full explanation of the endpoint strategy (why not api.z.ai), key-works-on-both-domains note.
+
+E2E verification (all on TRUE static servers — python http.server with no /api routes, i.e. exact GitHub Pages conditions):
+- Cold-start setup on a fresh origin: PASSED (was failing before the bigmodel.cn switch).
+- In-browser fetch proofs: api.z.ai "CONFIRMED BLOCKED: Failed to fetch" vs bigmodel.cn "status 200 → BROWSER DIRECT OK".
+- Root static + subdirectory static (github.io/repo/ simulation): boots, loads assets relatively, proxy auto-detects false, chats stream.
+- Full flows green: chat math (instant), quiz (interactive, verdict, explanations, SVG answer marks), auto web search (grounded + honest when refs lack the fact), zip extractor (3 files in-browser), zip+question in Agent mode (chat fallback answers with file contents), real builds (tip calculator 12.5KB shipped 8/10; dice roller 24.5KB shipped 8/10 after fix pass) with live trace/section-detection/KB/s.
+- Console: zero errors (only the expected Firebase anonymous-auth-not-enabled notice — local fallback by design; README documents enabling it).
+- VLM visual QA: no Chinese, no emoji, no glitches, polished dark UI, live artifact previews working.
+- Final artifacts synced: download/ace + public/ace identical (19 files, 99.7KB zip incl. .nojekyll); preview at /ace/index.html serves v1.1.7.
+
+Stage Summary:
+- "Doesn't work on GitHub Pages" is fixed at the root: browser-direct calls now go to bigmodel.cn (IPv4-only, 100% CORS preflight pass, same key/models), with 4-gateway rotation, 12-attempt retry, and a boot-time preflight warm-up.
+- Every file was checked; remaining issues found and fixed during the audit: agent question-fallback, planner example-copy bug, parallel proxy racing, SVG quiz marks, cache-busting, .nojekyll, README deploy clarity.
+- Deliverables: /home/z/my-project/download/ace/ + ace.zip (v1.1.7); preview at /ace/index.html.

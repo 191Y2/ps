@@ -463,6 +463,7 @@ window.Ace = window.Ace || {};
   C.taskBegin = taskBegin;   // used by work.js (agentic trace timings)
   C.taskEnd = taskEnd;
   C.finishTasks = finishTasks;
+  C.runCompletion = runCompletion; // used by work.js (agent → chat fallback for non-build requests)
 
   async function runCompletion(chat, retryOf) {
     C.sending = true;

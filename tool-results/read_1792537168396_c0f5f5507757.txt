@@ -1,0 +1,759 @@
+     1→/* ============================================================
+     2→   Ace — chat.js · conversations: sidebar, rendering, send flow,
+     3→   regenerate/edit, export. Work-mode message handling lives in
+     4→   work.js; this file powers Chat mode + shared plumbing.
+     5→   Includes the live TASK STOPWATCH: every phase of an answer
+     6→   (Searching the web · 3.4s, Thinking · 2.1s, Creating quiz UI ·
+     7→   7.9s …) streams into a chip row under the message header, with
+     8→   a "Worked for 12.5s" total when it finishes.
+     9→   ============================================================ */
+    10→"use strict";
+    11→window.Ace = window.Ace || {};
+    12→(function () {
+    13→  const $ = (id) => document.getElementById(id);
+    14→  const C = { chats: [], activeChat: null, messages: [], sending: false, abort: null };
+    15→
+    16→  /* ================= SIDEBAR ================= */
+    17→  function groupLabel(ts) {
+    18→    const d = new Date(ts), now = new Date();
+    19→    const days = Math.floor((new Date(now.toDateString()) - new Date(d.toDateString())) / 86400000);
+    20→    if (days <= 0) return "Today";
+    21→    if (days === 1) return "Yesterday";
+    22→    if (days <= 7) return "Previous 7 days";
+    23→    if (days <= 30) return "Previous 30 days";
+    24→    return "Older";
+    25→  }
+    26→
+    27→  C.renderSidebar = () => {
+    28→    const list = $("chatList");
+    29→    if (!list) return;
+    30→    const mode = Ace.App ? Ace.App.mode : "chat";
+    31→    const q = (($("chatSearch") && $("chatSearch").value) || "").toLowerCase().trim();
+    32→    let items = C.chats.filter(c => (c.mode || "chat") === mode);
+    33→    if (q) items = items.filter(c => (c.title || "").toLowerCase().includes(q));
+    34→    items.sort((a, b) => ((b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)) || ((b.updatedAt || 0) - (a.updatedAt || 0)));
+    35→    list.innerHTML = "";
+    36→
+    37→    const pinned = items.filter(c => c.pinned);
+    38→    const rest = items.filter(c => !c.pinned);
+    39→    if (!items.length) {
+    40→      list.append(Ace.el("div", "sb-empty", mode === "work" ?
+    41→        "No projects yet — describe an app or game to build." :
+    42→        "No chats yet. Start one — I remember what matters."));
+    43→      return;
+    44→    }
+    45→    if (pinned.length) list.append(section("Pinned", pinned));
+    46→    const groups = {};
+    47→    rest.forEach(c => { const g = groupLabel(c.updatedAt || c.createdAt || 0); (groups[g] = groups[g] || []).push(c); });
+    48→    const ORDER = ["Today", "Yesterday", "Previous 7 days", "Previous 30 days", "Older"];
+    49→    ORDER.forEach(g => { if (groups[g]) list.append(section(g, groups[g])); });
+    50→
+    51→    function section(label, chats) {
+    52→      const sec = Ace.el("div", "sb-section");
+    53→      sec.append(Ace.el("div", "sb-sec-label", label));
+    54→      chats.forEach(chat => sec.append(item(chat)));
+    55→      return sec;
+    56→    }
+    57→    function item(chat) {
+    58→      const it = Ace.el("div", "sb-item" + (C.activeChat && C.activeChat.id === chat.id ? " active" : ""));
+    59→      const title = Ace.el("div", "sb-item-title", Ace.esc(chat.title || "New chat"));
+    60→      const acts = Ace.el("div", "sb-item-acts");
+    61→      const pinB = actBtn("pin", chat.pinned ? "Unpin" : "Pin");
+    62→      pinB.innerHTML = Ace.ICON("pin", 13);
+    63→      if (chat.pinned) pinB.classList.add("on");
+    64→      pinB.onclick = async (e) => {
+    65→        e.stopPropagation();
+    66→        chat.pinned = !chat.pinned;
+    67→        await Ace.Store.updateChat(chat.id, { pinned: chat.pinned });
+    68→        C.renderSidebar();
+    69→      };
+    70→      const renB = actBtn("edit", "Rename"); renB.innerHTML = Ace.ICON("edit", 13);
+    71→      renB.onclick = (e) => { e.stopPropagation(); renameChat(chat); };
+    72→      const delB = actBtn("trash", "Delete"); delB.innerHTML = Ace.ICON("trash", 13);
+    73→      delB.onclick = (e) => {
+    74→        e.stopPropagation();
+    75→        Ace.UI.confirm("Delete this chat?", "This removes the conversation and its messages.", async () => {
+    76→          await Ace.Store.deleteChat(chat.id);
+    77→          C.chats = C.chats.filter(x => x.id !== chat.id);
+    78→          if (C.activeChat && C.activeChat.id === chat.id) { C.activeChat = null; C.messages = []; C.renderMessages(); C.showWelcome(); }
+    79→          C.renderSidebar();
+    80→        });
+    81→      };
+    82→      acts.append(pinB, renB, delB);
+    83→      it.append(title, acts);
+    84→      it.onclick = () => C.open(chat.id);
+    85→      return it;
+    86→    }
+    87→    function actBtn(name, title) {
+    88→      const b = Ace.el("button", "sb-act", "");
+    89→      b.title = title; b.setAttribute("aria-label", title);
+    90→      return b;
+    91→    }
+    92→  };
+    93→
+    94→  function renameChat(chat) {
+    95→    Ace.UI.prompt("Rename chat", chat.title || "", async (val) => {
+    96→      if (!val || !val.trim()) return;
+    97→      chat.title = val.trim().slice(0, 60);
+    98→      await Ace.Store.updateChat(chat.id, { title: chat.title });
+    99→      C.renderSidebar();
+   100→    });
+   101→  }
+   102→
+   103→  async function loadChats() {
+   104→    try { C.chats = await Ace.Store.listChats(); }
+   105→    catch (e) { C.chats = []; }
+   106→    C.renderSidebar();
+   107→  }
+   108→  C.loadChats = loadChats;
+   109→
+   110→  /* ================= MESSAGE RENDERING ================= */
+   111→  C.renderMessages = () => {
+   112→    const wrap = $("messages");
+   113→    wrap.innerHTML = "";
+   114→    C.messages.forEach(m => wrap.append(renderMessage(m)));
+   115→    C.showWelcome(C.messages.length === 0);
+   116→    C.scrollBottom(true);
+   117→  };
+   118→
+   119→  C.showWelcome = (show) => {
+   120→    const w = $("welcome"), msgs = $("messages");
+   121→    if (!w) return;
+   122→    const mode = Ace.App ? Ace.App.mode : "chat";
+   123→    $("welcomeTitle").textContent = mode === "work" ? "What are we building?" : "What are we working on?";
+   124→    $("welcomeSub").textContent = mode === "work" ?
+   125→      "Describe an app, game, or site. Ace plans it, builds it, reviews it, ships it." :
+   126→      "Homework, essays, quizzes, research — I got you.";
+   127→    w.classList.toggle("hidden", !show);
+   128→    if (msgs && show) msgs.classList.add("hidden"); else if (msgs) msgs.classList.remove("hidden");
+   129→    renderWelcomeChips(mode);
+   130→  };
+   131→
+   132→  function renderWelcomeChips(mode) {
+   133→    const wrap = $("welcomeChips");
+   134→    if (!wrap) return;
+   135→    wrap.innerHTML = "";
+   136→    const chips = mode === "work"
+   137→      ? [["code", "Build a game", "Build a polished browser game — canvas, 60fps, score, restart, mobile-friendly. Pick a fun concept and go."],
+   138→         ["clock", "Study tool app", "Build a study tool app — focus timer + task list + pomodoro stats, saved locally, clean design."],
+   139→         ["stats", "Dashboard site", "Build a sleek personal dashboard site — clock, quick links, notes with localStorage, dark mode."],
+   140→         ["spark", "Flashcard app", "Build a flashcards web app — decks, flip animation, known/review tracking, shuffle. Make it beautiful."]]
+   141→      : [["edit", "Essay help", "Help me write an essay — ask me for my topic, then guide me with structure and a strong intro."],
+   142→         ["bulb", "Quiz me", "Quiz me on something I'm studying — ask what subject first, then build me quizzes."],
+   143→         ["img", "Study guide", "Make me a study guide with key terms, a timeline, and a study plan."],
+   144→         ["img", "Solve from photo", ""],
+   145→         ["globe", "Search the web", ""]];
+   146→    chips.forEach(([icon, label, fill]) => {
+   147→      const ch = Ace.el("button", "chip", Ace.ICON(icon, 15) + " " + label);
+   148→      ch.onclick = () => {
+   149→        if (label === "Solve from photo") { const fi = $("fileInput"); fi && fi.click(); return; }
+   150→        if (label === "Search the web") { Ace.App.setWeb(true); const i = $("input"); i.placeholder = "Ask about anything current…"; i.focus(); return; }
+   151→        const i = $("input"); i.value = fill; Ace.App.resizeInput(); i.focus();
+   152→      };
+   153→      wrap.append(ch);
+   154→    });
+   155→  }
+   156→
+   157→  /* ================= TASK STOPWATCH =================
+   158→     ai.tasks = [{k, label, t0, t1}] — t1 null while running.
+   159→     Rendered as chips; a 120ms interval re-renders the live one so
+   160→     the seconds tick in real time. */
+   161→  const fmtSecs = (ms) => ((ms || 0) / 1000).toFixed(1);
+   162→
+   163→  function renderTaskBar(m) {
+   164→    const tasks = m.tasks || [];
+   165→    if (!tasks.length) return null;
+   166→    const running = m.streaming !== false && tasks.some(t => !t.t1);
+   167→    const bar = Ace.el("div", "taskbar");
+   168→    tasks.forEach((t, i) => {
+   169→      const live = !t.t1;
+   170→      const ms = live ? Date.now() - t.t0 : t.t1 - t.t0;
+   171→      const chip = Ace.el("span", "task-chip" + (live ? " run" : " done"),
+   172→        `${live ? '<span class="task-dot"></span>' : Ace.ICON("check", 11)}<span class="task-lbl">${Ace.esc(t.label)}</span><span class="task-time">${fmtSecs(ms)}s</span>`);
+   173→      chip.dataset.taskIdx = i;
+   174→      bar.append(chip);
+   175→    });
+   176→    const last = tasks[tasks.length - 1];
+   177→    if (!running && last && last.t1) {
+   178→      const total = tasks.reduce((a, t) => a + ((t.t1 || t.t0) - t.t0), 0);
+   179→      const tot = Ace.el("span", "task-total", `${Ace.ICON("clock", 11)} Worked for ${fmtSecs(total)}s`);
+   180→      bar.append(tot);
+   181→    }
+   182→    return bar;
+   183→  }
+   184→
+   185→  const taskTimers = {};
+   186→  function startTaskTicker(m) {
+   187→    stopTaskTicker(m);
+   188→    taskTimers[m.id] = setInterval(() => {
+   189→      const node = document.querySelector(`[data-mid="${m.id}"] .taskbar`);
+   190→      if (!node) return;
+   191→      const bar = renderTaskBar(m);
+   192→      if (bar) node.replaceWith(bar);
+   193→      C.scrollBottom();
+   194→    }, 120);
+   195→  }
+   196→  function stopTaskTicker(m) {
+   197→    clearInterval(taskTimers[m.id]); delete taskTimers[m.id];
+   198→  }
+   199→  function finishTasks(m) {
+   200→    (m.tasks || []).forEach(t => { if (!t.t1) t.t1 = Date.now(); });
+   201→    stopTaskTicker(m);
+   202→  }
+   203→
+   204→  function renderMessage(m) {
+   205→    if (m.role === "user") {
+   206→      const el = Ace.el("div", "msg msg-user");
+   207→      el.dataset.mid = m.id;
+   208→      const bubble = Ace.el("div", "bubble");
+   209→      if (m.images && m.images.length) {
+   210→        const grid = Ace.el("div", "msg-imgs");
+   211→        m.images.forEach(im => {
+   212→          const img = Ace.el("img", "msg-img");
+   213→          img.src = im.dataUrl || im; img.alt = "attached image";
+   214→          img.onclick = () => Ace.Images.lightbox(img.src);
+   215→          grid.append(img);
+   216→        });
+   217→        bubble.append(grid);
+   218→      }
+   219→      if (m.files && m.files.length) {
+   220→        const fr = Ace.el("div", "msg-files");
+   221→        m.files.forEach(f => {
+   222→          const kb = f.size < 1024 ? f.size + " B" : (f.size / 1024).toFixed(1) + " KB";
+   223→          fr.append(Ace.el("div", "msg-file",
+   224→            `<span class="fc-ic">${Ace.ICON(/\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(f.name) ? "img" : "file", 13)}</span>
+   225→             <span class="msg-file-name" title="${Ace.esc(f.name)}">${Ace.esc(f.name)}</span>
+   226→             <span class="msg-file-size">${kb}</span>`));
+   227→        });
+   228→        bubble.append(fr);
+   229→      }
+   230→      if (m.content) bubble.append(Ace.el("div", "msg-text", Ace.esc(m.content).replace(/\n/g, "<br>")));
+   231→      const tools = Ace.el("div", "msg-tools");
+   232→      const edit = Ace.el("button", "mact", Ace.ICON("edit", 14));
+   233→      edit.title = "Edit & resend";
+   234→      edit.onclick = () => C.editUser(m.id);
+   235→      tools.append(edit);
+   236→      el.append(bubble, tools);
+   237→      return el;
+   238→    }
+   239→
+   240→    // assistant
+   241→    const el = Ace.el("div", "msg msg-ai");
+   242→    el.dataset.mid = m.id;
+   243→    const avatar = Ace.el("div", "ai-avatar", Ace.ICON("spark", 15));
+   244→    const col = Ace.el("div", "msg-col");
+   245→
+   246→    // header
+   247→    const head = Ace.el("div", "msg-head");
+   248→    const name = Ace.el("span", "msg-name", "Ace");
+   249→    const modelTag = m.model ? Ace.el("span", "msg-model", Ace.esc((Ace.modelById(m.model) || {}).label || m.model)) : null;
+   250→    head.append(name);
+   251→    if (modelTag) head.append(modelTag);
+   252→    if (m.flags && m.flags.web) head.append(Ace.el("span", "msg-flag", Ace.ICON("globe", 12) + " Searched the web"));
+   253→    if (m.flags && m.flags.think) head.append(Ace.el("span", "msg-flag", Ace.ICON("bulb", 12) + " Thought hard"));
+   254→    if (m.flags && m.flags.deep) head.append(Ace.el("span", "msg-flag", Ace.ICON("search", 12) + " Deep research"));
+   255→    if (m.fallbackUsed) head.append(Ace.el("span", "msg-flag warn", Ace.ICON("warn", 12) + " fell back to free model"));
+   256→    if (m.error) head.append(Ace.el("span", "msg-flag warn", Ace.ICON("warn", 12) + " error"));
+   257→
+   258→    col.append(head);
+   259→
+   260→    // task stopwatch chips
+   261→    const tb = renderTaskBar(m);
+   262→    if (tb) col.append(tb);
+   263→
+   264→    if (m.reasoning) {
+   265→      const t = Ace.el("details", "thinking");
+   266→      t.innerHTML = `<summary>${Ace.ICON("bulb", 13)} Reasoning</summary><div class="thinking-body">${Ace.esc(m.reasoning).replace(/\n/g, "<br>")}</div>`;
+   267→      if (m.streaming) t.open = true;
+   268→      col.append(t);
+   269→    }
+   270→
+   271→    if (m.workTrace) col.append(Ace.Work.renderTrace(m)); // work-mode agent trace
+   272→
+   273→    const body = Ace.el("div", "msg-body");
+   274→    body.append(...renderContent(m));
+   275→    col.append(body);
+   276→
+   277→    if (m.searchResult && m.searchResult.length) col.append(renderSources(m.searchResult));
+   278→
+   279→    // actions
+   280→    const acts = Ace.el("div", "msg-acts");
+   281→    const copy = Ace.el("button", "mact", Ace.ICON("copy", 14));
+   282→    copy.title = "Copy";
+   283→    copy.onclick = () => {
+   284→      navigator.clipboard && navigator.clipboard.writeText(m.content || "");
+   285→      copy.innerHTML = Ace.ICON("check", 14);
+   286→      setTimeout(() => copy.innerHTML = Ace.ICON("copy", 14), 1200);
+   287→    };
+   288→    acts.append(copy);
+   289→    if (!m.streaming && !m.error) {
+   290→      const regen = Ace.el("button", "mact", Ace.ICON("refresh", 14));
+   291→      regen.title = "Regenerate";
+   292→      regen.onclick = () => C.regenerate(m.id);
+   293→      acts.append(regen);
+   294→      const up = Ace.el("button", "mact" + (m.rating === 1 ? " on" : ""), Ace.ICON("thumbUp", 15));
+   295→      const down = Ace.el("button", "mact" + (m.rating === -1 ? " on" : ""), Ace.ICON("thumbDown", 15));
+   296→      up.title = "Good answer"; down.title = "Bad answer";
+   297→      up.onclick = () => rate(m, 1); down.onclick = () => rate(m, -1);
+   298→      acts.append(up, down);
+   299→    }
+   300→    if (m.streaming) {
+   301→      const stop = Ace.el("button", "mact stop", Ace.ICON("stop", 14) + " Stop");
+   302→      stop.onclick = () => C.abort && C.abort.abort();
+   303→      acts.append(stop);
+   304→    }
+   305→    if (m.error) {
+   306→      const retry = Ace.el("button", "mact", Ace.ICON("refresh", 14) + " Retry");
+   307→      retry.onclick = () => C.regenerate(m.id, true);
+   308→      acts.append(retry);
+   309→    }
+   310→    col.append(acts);
+   311→    el.append(avatar, col);
+   312→    return el;
+   313→  }
+   314→
+   315→  function rate(m, v) {
+   316→    m.rating = m.rating === v ? 0 : v;
+   317→    Ace.Store.updateMessage(C.activeChat.id, m.id, { rating: m.rating }).catch(() => {});
+   318→    C.rerenderMessage(m);
+   319→  }
+   320→
+   321→  function renderSources(sources) {
+   322→    const wrap = Ace.el("div", "sources");
+   323→    wrap.append(Ace.el("div", "sources-label", Ace.ICON("globe", 13) + " Sources"));
+   324→    const row = Ace.el("div", "sources-row");
+   325→    sources.slice(0, 10).forEach((s, i) => {
+   326→      let host = s.media || s.link || "";
+   327→      try { host = new URL(s.link).hostname.replace(/^www\./, ""); } catch (e) {}
+   328→      const chip = Ace.el("a", "source-chip",
+   329→        `${s.icon ? `<img class="src-ic" src="${Ace.esc(s.icon)}" alt="">` : `<span class="src-n">${i + 1}</span>`}
+   330→         <span class="src-t">${Ace.esc(s.title || host).slice(0, 42)}</span><span class="src-h">${Ace.esc(host)}</span>`);
+   331→      chip.href = s.link || "#"; chip.target = "_blank"; chip.rel = "noopener noreferrer";
+   332→      chip.title = s.title || host;
+   333→      row.append(chip);
+   334→    });
+   335→    wrap.append(row);
+   336→    return wrap;
+   337→  }
+   338→
+   339→  /* ---- content segments: markdown runs + UI blocks + code fences ---- */
+   340→  function renderContent(m, streaming) {
+   341→    const nodes = [];
+   342→    const segs = Ace.MD.split(m.content || "");
+   343→    segs.forEach((seg, idx) => {
+   344→      if (seg.kind === "md") {
+   345→        if (!seg.text.trim()) return;
+   346→        const div = Ace.el("div", "md");
+   347→        div.innerHTML = Ace.MD.render(seg.text);
+   348→        nodes.push(div);
+   349→      } else { // fence
+   350→        const looksUI = Ace.Blocks.isBlock(seg.lang) || seg.lang === "json" || seg.lang === "";
+   351→        if (looksUI && !seg.closed && m.streaming) {
+   352→          nodes.push(Ace.el("div", "blk blk-skeleton", `<div class="skel-line"></div><div class="skel-line short"></div><div class="skel-line"></div><div class="skel-note">${Ace.ICON("spark", 13)} composing UI…</div>`));
+   353→        } else if (looksUI) {
+   354→          nodes.push(Ace.Blocks.render(seg.lang, seg.body, blockCtx(m, idx)));
+   355→        } else if (seg.lang === "html" && m.artifacts && m.artifacts.length) {
+   356→          // handled by work.js trace/artifact UI; skip raw echo
+   357→        } else if (seg.body && seg.body.trim()) {
+   358→          nodes.push(Ace.Blocks.renderCode(seg.lang, seg.body));
+   359→        }
+   360→      }
+   361→    });
+   362→    return nodes;
+   363→  }
+   364→
+   365→  function blockCtx(m, idx) {
+   366→    return {
+   367→      messageId: m.id, blockIndex: idx,
+   368→      state: (m.uiStates || {})[idx],
+   369→      save: (patch) => {
+   370→        m.uiStates = m.uiStates || {};
+   371→        m.uiStates[idx] = Object.assign({}, m.uiStates[idx], patch);
+   372→        C.persistUIStates(m);
+   373→      }
+   374→    };
+   375→  }
+   376→  const uiTimers = {};
+   377→  C.persistUIStates = (m) => {
+   378→    clearTimeout(uiTimers[m.id]);
+   379→    uiTimers[m.id] = setTimeout(() => {
+   380→      if (C.activeChat) Ace.Store.updateMessage(C.activeChat.id, m.id, { uiStates: m.uiStates || {} }).catch(() => {});
+   381→    }, 900);
+   382→  };
+   383→
+   384→  /* ================= OPEN / CREATE ================= */
+   385→  C.open = async (chatId) => {
+   386→    const chat = C.chats.find(c => c.id === chatId);
+   387→    if (!chat) return;
+   388→    C.activeChat = chat;
+   389→    if (Ace.App.mode !== (chat.mode || "chat")) Ace.App.setMode(chat.mode || "chat");
+   390→    try { C.messages = await Ace.Store.listMessages(chatId); }
+   391→    catch (e) { C.messages = []; }
+   392→    C.renderSidebar();
+   393→    C.renderMessages();
+   394→    history.replaceState(null, "", "#" + chatId);
+   395→  };
+   396→
+   397→  C.newChat = () => {
+   398→    C.activeChat = null; C.messages = [];
+   399→    C.renderSidebar(); C.renderMessages();
+   400→    history.replaceState(null, "", "#");
+   401→    const i = $("input"); if (i) i.focus();
+   402→  };
+   403→
+   404→  async function ensureChat(mode) {
+   405→    if (C.activeChat) return C.activeChat;
+   406→    const chat = {
+   407→      id: Ace.uid(), title: "", mode: mode || "chat",
+   408→      createdAt: Date.now(), updatedAt: Date.now(), pinned: false, msgCount: 0, summary: ""
+   409→    };
+   410→    await Ace.Store.createChat(chat);
+   411→    C.chats.unshift(chat);
+   412→    C.activeChat = chat;
+   413→    C.renderSidebar();
+   414→    return chat;
+   415→  }
+   416→
+   417→  /* ================= SEND FLOW ================= */
+   418→  C.send = async () => {
+   419→    if (C.sending) return;
+   420→    const input = $("input");
+   421→    const text = input.value.trim();
+   422→    const images = Ace.Images.pending.slice();
+   423→    const files = Ace.Files ? Ace.Files.take() : [];
+   424→    if (!text && !images.length && !files.length) return;
+   425→    if (!Ace.API.hasKey()) { Ace.UI.openSettings(); return; }
+   426→
+   427→    input.value = ""; Ace.App.resizeInput();
+   428→    Ace.Images.pending.length = 0; Ace.Images.renderChips();
+   429→
+   430→    const mode = Ace.App.mode;
+   431→    if (mode === "work") return Ace.Work.send(text, images, files); // agent mode pipeline
+   432→
+   433→    const chat = await ensureChat(mode);
+   434→    const userMsg = { id: Ace.uid(), role: "user", content: text, images, files, createdAt: Date.now() };
+   435→    C.messages.push(userMsg);
+   436→    C.appendMessage(userMsg);
+   437→    await Ace.Store.addMessage(chat.id, userMsg);
+   438→    if (!chat.title) {
+   439→      chat.title = text.slice(0, 40) || (images.length ? "Images" : "Files");
+   440→      Ace.Store.updateChat(chat.id, { title: chat.title }).catch(() => {});
+   441→      Ace.Memory.genTitle(text || "image analysis", chat.id).then(t => {
+   442→        chat.title = t; C.renderSidebar();
+   443→      }).catch(() => {});
+   444→    }
+   445→    C.renderSidebar();
+   446→    await runCompletion(chat);
+   447→  };
+   448→
+   449→  /* task helpers bound to an assistant message */
+   450→  function taskBegin(ai, k, label) {
+   451→    ai.tasks = ai.tasks || [];
+   452→    const ex = ai.tasks.find(t => t.k === k);
+   453→    if (ex) { if (ex.t1) { ex.t1 = null; ex.label = label; } }
+   454→    else ai.tasks.push({ k, label, t0: Date.now(), t1: null });
+   455→    if (ai.streaming !== false) startTaskTicker(ai);
+   456→    C.rerenderMessage(ai);
+   457→  }
+   458→  function taskEnd(ai, k) {
+   459→    const t = (ai.tasks || []).find(t => t.k === k && !t.t1);
+   460→    if (t) t.t1 = Date.now();
+   461→    C.rerenderMessage(ai);
+   462→  }
+   463→  C.taskBegin = taskBegin;   // used by work.js (agentic trace timings)
+   464→  C.taskEnd = taskEnd;
+   465→  C.finishTasks = finishTasks;
+   466→
+   467→  async function runCompletion(chat, retryOf) {
+   468→    C.sending = true;
+   469→    Ace.App.setSending(true);
+   470→    const t0 = Date.now();
+   471→    const ai = retryOf || {
+   472→      id: Ace.uid(), role: "assistant", content: "", createdAt: Date.now(),
+   473→      model: "", flags: { think: Ace.App.toggles.think, web: Ace.App.toggles.web, deep: Ace.App.toggles.deep },
+   474→      uiStates: {}, tasks: []
+   475→    };
+   476→    ai.tasks = ai.tasks || [];
+   477→    if (!retryOf) { C.messages.push(ai); }
+   478→    ai.streaming = true;
+   479→    C.rerenderMessage(ai);
+   480→    C.scrollBottom();
+   481→    startTaskTicker(ai);
+   482→
+   483→    const lastUser = [...C.messages].reverse().find(m => m.role === "user");
+   484→    const userText = (lastUser && lastUser.content) || "";
+   485→    const hasImages = !!(lastUser && lastUser.images && lastUser.images.length);
+   486→    const hasFiles = !!(lastUser && lastUser.files && lastUser.files.length);
+   487→
+   488→    try {
+   489→      // context assembly
+   490→      const settings = await Ace.Store.getSettings();
+   491→      const memories = await Ace.Memory.recall(userText).catch(() => []);
+   492→      const memHint = $("memHint"); if (memHint) memHint.textContent = memories.length ? `${memories.length} memories in context` : "";
+   493→
+   494→      /* Auto web-grounding: current-events / live-fact questions get real
+   495→         references even when the Web toggle is off (the #1 hallucination
+   496→         source is stale training data answering "current" questions). */
+   497→      const autoWeb = settings.autoWebSearch !== false && !hasImages && !hasFiles && !Ace.App.toggles.web &&
+   498→        /\b(latest|today|tonight|right now|current(ly)?|news|prices?|record|score|champion|winner|reign)\b|\bwho (won|is|was|are|beat|plays|fought)\b|\bwho'?s (the|a|playing|winning)\b|\bhow (old|tall|many)\b|\bnet worth\b|\b(ranking|ranked|standings?|stats?|statistics)\b|\bweather\b|\b(up ?to ?date|update on|updated)\b|\b(stock|election|released|coming out|game last night|season|episode|schedule|draft|trade)\b|\b(still )?(alive|dead|retired|dating|married|together)\b|\btop \d+\b|\btrue or false\b|\b(fake|real)\b.*(news|story|video)?\s*\?|20(2[5-9]|3[0-9])/i.test(userText);
+   499→      const useWeb = Ace.App.toggles.web || autoWeb;
+   500→      const useDeep = Ace.App.toggles.deep && !hasImages;
+   501→      if (autoWeb) Ace.UI.toast("Auto web search on — this looks like a current-events question", "info");
+   502→
+   503→      if (useDeep) {
+   504→        await runDeep(chat, ai, userText);
+   505→      } else {
+   506→        /* ---- REAL web search (blocks the reply; stopwatch shows live) ---- */
+   507→        let refs = [];
+   508→        if (useWeb && !hasImages) {
+   509→          taskBegin(ai, "search", "Searching the web");
+   510→          refs = await Ace.API.searchWeb(userText).catch(() => []);
+   511→          taskEnd(ai, "search");
+   512→          if (!refs.length && Ace.App.toggles.web)
+   513→            Ace.UI.toast("The web search came back empty — Ace will answer from what it knows and say so", "warn");
+   514→        }
+   515→        ai.flags.web = useWeb && !!refs.length; // honest flag: only claim it if it actually happened
+   516→
+   517→        const sysPrompt = Ace.PROMPTS.chat({
+   518→          webSearch: useWeb, refs, memories, summary: chat.summary,
+   519→          quizHint: /quiz|test me|flash ?card|drill me|practice (test|questions?)|study for/i.test(userText),
+   520→          imageCount: hasImages ? lastUser.images.length : 0,
+   521→          fileCount: hasFiles ? lastUser.files.length : 0
+   522→        });
+   523→        const history = C.messages.slice(-Ace.HISTORY_LIMIT)
+   524→          .map(m => {
+   525→            const isLastUser = m.role === "user" && m === lastUser;
+   526→            let content = m.content;
+   527→            // files ride along with the LAST user message (full contents for the AI to view)
+   528→            if (isLastUser && m.files && m.files.length && Ace.Files)
+   529→              content = (content || "") + Ace.Files.buildContextFrom(m.files);
+   530→            return {
+   531→              role: m.role, content,
+   532→              // images only survive on the LAST user message (vision routing);
+   533→              // older image messages degrade to text so text models don't reject them
+   534→              images: (m.role === "user" && m === lastUser) ? m.images : undefined
+   535→            };
+   536→          });
+   537→        history.unshift({ role: "system", content: sysPrompt });
+   538→
+   539→        /* routing: free-first. Think = reasoning ON (same free model).
+   540→           Images route to the vision model. Everything else runs with
+   541→           thinking OFF for instant first tokens. */
+   542→        let model, chain, thinking = "disabled";
+   543→        if (hasImages) { model = Ace.ROUTE.vision; chain = Ace.chainFor(Ace.ROUTE.vision, "vision"); thinking = "disabled"; }
+   544→        else if (Ace.App.toggles.think) { model = Ace.ROUTE.think; chain = Ace.chainFor(Ace.ROUTE.think, "text"); thinking = "enabled"; }
+   545→        else { model = Ace.ROUTE.chat; chain = Ace.chainFor(Ace.ROUTE.chat, "text"); }
+   546→
+   547→        let streamDone = false; // ignore any late delta racing after completion
+   548→        const onDelta = (content, reasoning) => {
+   549→          if (streamDone) return;
+   550→          ai.content = content; ai.reasoning = reasoning; ai.streaming = true;
+   551→          // phase detection for the stopwatch
+   552→          if (reasoning && !content) taskBegin(ai, "think", "Thinking");
+   553→          else if (content) {
+   554→            if ((ai.tasks || []).some(t => t.k === "think" && !t.t1)) taskEnd(ai, "think");
+   555→            const opens = (content.match(/```/g) || []).length;
+   556→            if (opens % 2 === 1) { // we're inside an open fence right now
+   557→              const fm = content.slice(content.lastIndexOf("```")).match(/^```(\w+)/);
+   558→              if (fm && Ace.Blocks.isBlock(fm[1]))
+   559→                taskBegin(ai, "ui", "Creating " + (/quiz/.test(fm[1]) ? "quiz" : fm[1]) + " UI");
+   560→              else taskBegin(ai, "ui", "Writing code");
+   561→            } else {
+   562→              taskBegin(ai, "write", "Writing");
+   563→            }
+   564→          }
+   565→          C.rerenderMessage(ai, true);
+   566→          C.scrollBottom();
+   567→        };
+   568→        const res = await Ace.API.stream({
+   569→          model, fallbackChain: chain, taskKey: "chat", thinking,
+   570→          temperature: 0.35, // factual-first (hallucination research: 0.1-0.4)
+   571→          messages: history, signal: (C.abort = new AbortController()).signal,
+   572→          onDelta
+   573→        });
+   574→        streamDone = true;
+   575→
+   576→        ai.content = res.content; ai.reasoning = res.reasoning || "";
+   577→        ai.model = res.model; ai.fallbackUsed = res.fallbackUsed;
+   578→        if (res.interrupted) { // connection dropped mid-answer — keep what streamed
+   579→          ai.content += "\n\n*(the connection dropped — this answer may be cut off; tap Retry to regenerate)*";
+   580→          ai.error = true;
+   581→        }
+   582→        ai.streaming = false;
+   583→        ai.searchResult = (useWeb && refs.length) ? refs : null;
+   584→        finishTasks(ai);
+   585→        C.rerenderMessage(ai);
+   586→        await Ace.Store.addMessage(chat.id, ai);
+   587→      }
+   588→
+   589→      // background: memory + summary (never blocks the reply)
+   590→      Ace.Memory.extract(C.messages.slice(0, -1), chat.id).then(r => {
+   591→        if (r && (r.added || r.updated || r.deleted)) {
+   592→          const parts = [];
+   593→          if (r.added) parts.push(`${r.added} new`);
+   594→          if (r.updated) parts.push(`${r.updated} updated`);
+   595→          Ace.UI.toast(`Memory: ${parts.join(", ")}`, "ok");
+   596→        }
+   597→      }).catch(() => {});
+   598→      if (C.messages.length >= Ace.SUMMARIZE_AFTER && C.messages.length % 8 === 0) {
+   599→        Ace.Memory.summarize(chat, C.messages).catch(() => {});
+   600→      }
+   601→      await Ace.Store.updateChat(chat.id, { msgCount: C.messages.length, updatedAt: Date.now() });
+   602→    } catch (e) {
+   603→      finishTasks(ai);
+   604→      if (e.name === "AbortError") {
+   605→        ai.streaming = false; ai.content = ai.content || "*(stopped)*";
+   606→        C.rerenderMessage(ai);
+   607→        if (ai.content && ai.content !== "*(stopped)*") await Ace.Store.addMessage(chat.id, ai);
+   608→      } else {
+   609→        ai.streaming = false; ai.error = true;
+   610→        const partial = (ai.content || "").trim();
+   611→        const netDrop = e.kind === "network" || /dropped/i.test(e.message || "");
+   612→        if (partial && netDrop) {
+   613→          // keep whatever streamed before the drop — it's usually still useful
+   614→          ai.content = partial + "\n\n*(the connection dropped mid-answer — tap Retry to regenerate)*";
+   615→        } else {
+   616→          ai.content = `**Something went wrong.** ${Ace.esc(Ace.API.friendlyError(e))}`;
+   617→        }
+   618→        C.rerenderMessage(ai);
+   619→      }
+   620→    } finally {
+   621→      C.sending = false; C.abort = null;
+   622→      Ace.App.setSending(false);
+   623→      Ace.Images.pending.length = 0;
+   624→    }
+   625→  }
+   626→
+   627→  /* ---- deep research pipeline ---- */
+   628→  async function runDeep(chat, ai) {
+   629→    const lastUser = [...C.messages].reverse().find(m => m.role === "user");
+   630→    const query = (lastUser && lastUser.content) || "";
+   631→    ai.flags.deep = true;
+   632→    ai.flags.web = true;
+   633→    const res = await Ace.API.deepResearch({
+   634→      query, chain: Ace.chainFor(Ace.ROUTE.deep, "text"),
+   635→      signal: (C.abort = new AbortController()).signal,
+   636→      onStep: (label, state) => {
+   637→        const k = "step-" + label.split(" ")[0].toLowerCase();
+   638→        if (state === "run") taskBegin(ai, k, label);
+   639→        else taskEnd(ai, k);
+   640→      }
+   641→    });
+   642→    ai.content = res.report; ai.model = res.model || Ace.ROUTE.deep;
+   643→    ai.searchResult = res.sources; ai.streaming = false;
+   644→    ai.reasoning = "";
+   645→    finishTasks(ai);
+   646→    C.rerenderMessage(ai);
+   647→    await Ace.Store.addMessage(chat.id, ai);
+   648→  }
+   649→
+   650→  /* ================= ACTIONS ================= */
+   651→  C.regenerate = async (msgId, isRetry) => {
+   652→    if (C.sending) return;
+   653→    const idx = C.messages.findIndex(m => m.id === msgId);
+   654→    if (idx < 0) return;
+   655→    // drop this assistant msg and everything after it, keep the user turn
+   656→    C.messages = C.messages.slice(0, idx);
+   657→    const lastUser = [...C.messages].reverse().find(m => m.role === "user");
+   658→    if (C.activeChat && (C.activeChat.mode === "work") && lastUser && Ace.Work && !Ace.Work.running) {
+   659→      await Ace.Work.run(C.activeChat, lastUser.content || "", lastUser.files || []);
+   660→    } else {
+   661→      await runCompletion(C.activeChat);
+   662→    }
+   663→  };
+   664→
+   665→  C.editUser = (msgId) => {
+   666→    const idx = C.messages.findIndex(m => m.id === msgId);
+   667→    if (idx < 0 || C.sending) return;
+   668→    const m = C.messages[idx];
+   669→    const input = $("input");
+   670→    input.value = m.content || "";
+   671→    Ace.Images.pending.length = 0;
+   672→    (m.images || []).forEach(im => Ace.Images.pending.push(im));
+   673→    Ace.Images.renderChips();
+   674→    Ace.App.resizeInput();
+   675→    C.messages = C.messages.slice(0, idx);
+   676→    C.renderMessages();
+   677→    input.focus();
+   678→  };
+   679→
+   680→  C.rerenderMessage = (m, streamingSkipScroll) => {
+   681→    const old = document.querySelector(`[data-mid="${m.id}"]`);
+   682→    if (!old) { C.appendMessage(m); return; }
+   683→    const node = renderMessage(m);
+   684→    old.replaceWith(node);
+   685→  };
+   686→  C.appendMessage = (m) => {
+   687→    const wrap = $("messages");
+   688→    wrap.classList.remove("hidden");
+   689→    $("welcome") && $("welcome").classList.add("hidden");
+   690→    wrap.append(renderMessage(m));
+   691→  };
+   692→
+   693→  /* stick-to-bottom scrolling */
+   694→  let pinned = true;
+   695→  C.scrollBottom = (force) => {
+   696→    const z = $("scrollZone");
+   697→    if (!z) return;
+   698→    if (force || pinned) requestAnimationFrame(() => { z.scrollTop = z.scrollHeight; });
+   699→  };
+   700→  C.initScroll = () => {
+   701→    const z = $("scrollZone");
+   702→    if (!z) return;
+   703→    z.addEventListener("scroll", () => {
+   704→      pinned = z.scrollHeight - z.scrollTop - z.clientHeight < 120;
+   705→    }, { passive: true });
+   706→  };
+   707→
+   708→  /* quiz → harder quiz loop */
+   709→  document.addEventListener("ace:block-action", (e) => {
+   710→    const d = e.detail || {};
+   711→    if (d.type === "quiz-harder") {
+   712→      const input = $("input");
+   713→      input.value = `That quiz was good. Now make a HARDER one on ${d.topic || "the same topic"} — trickier questions, deeper application, same format.`;
+   714→      input.focus();
+   715→      Ace.App.sendCurrent && Ace.App.sendCurrent();
+   716→    }
+   717→  });
+   718→
+   719→  /* model fallback notice */
+   720→  document.addEventListener("ace:model-fallback", (e) => {
+   721→    const to = (Ace.modelById(e.detail.to) || {}).label || e.detail.to;
+   722→    Ace.UI.toast(`${to} picked up the job (the preferred model needs Z.ai balance)`, "warn");
+   723→  });
+   724→
+   725→  /* ================= EXPORT ================= */
+   726→  C.exportChat = () => {
+   727→    if (!C.activeChat || !C.messages.length) return Ace.UI.toast("Nothing to export yet", "warn");
+   728→    let md = `# ${C.activeChat.title || "Ace chat"}\n\n_${new Date(C.activeChat.createdAt || Date.now()).toLocaleString()} · exported from Ace_\n\n`;
+   729→    C.messages.forEach(m => {
+   730→      md += m.role === "user" ? `## You\n\n` : `## Ace${m.model ? ` (${m.model})` : ""}\n\n`;
+   731→      if (m.images && m.images.length) md += `*(${m.images.length} image${m.images.length > 1 ? "s" : ""} attached)*\n\n`;
+   732→      md += (m.content || "") + "\n\n";
+   733→    });
+   734→    downloadBlob(md, (C.activeChat.title || "ace-chat").replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "-") + ".md", "text/markdown");
+   735→  };
+   736→  function downloadBlob(text, name, type) {
+   737→    const a = document.createElement("a");
+   738→    a.href = URL.createObjectURL(new Blob([text], { type }));
+   739→    a.download = name; a.click();
+   740→    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+   741→  }
+   742→
+   743→  C.init = async () => {
+   744→    await loadChats();
+   745→    C.initScroll();
+   746→    const hash = location.hash.replace("#", "");
+   747→    if (hash && C.chats.find(c => c.id === hash)) { C.open(hash); return; }
+   748→    // no deep link → reopen the most recent chat of the current mode so a
+   749→    // reload never loses the conversation (fallback: welcome screen)
+   750→    const mode = (Ace.App && Ace.App.mode) || "chat";
+   751→    const last = C.chats.filter(c => (c.mode || "chat") === mode)
+   752→      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0];
+   753→    if (last) { await C.open(last.id); return; }
+   754→    C.showWelcome(true);
+   755→  };
+   756→
+   757→  Ace.Chat = C;
+   758→})();
+   759→

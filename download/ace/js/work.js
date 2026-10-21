@@ -265,6 +265,18 @@ window.Ace = window.Ace || {};
         addStep(ai, "plan", "Planning the build");
         const r = await callModel(Ace.PROMPTS.workPlanner(request, fNote), null, 0.35, 1200, signal);
         plan = parseJSONLoose(r.content) || { title: "Custom app", type: "app", oneLiner: request.slice(0, 100), features: [request.slice(0, 60)], steps: [{ name: "Build" }] };
+        if (plan && plan.type === "none") {
+          /* Not a build request (a question / small talk) → drop the agent
+             placeholder and answer through the normal chat pipeline instead
+             of inventing an app. Attached files, memories and auto web
+             search all still apply. */
+          Ace.Chat.finishTasks(ai); // stop the stopwatch ticker
+          const node = document.querySelector(`[data-mid="${ai.id}"]`);
+          if (node) node.remove();
+          Ace.Chat.messages = Ace.Chat.messages.filter(x => x !== ai);
+          await Ace.Chat.runCompletion(chat);
+          return;
+        }
         ai.workTrace.plan = plan;
         endStep(ai, "plan", "Plan ready: " + (plan.title || "build"), { state: "done",
           note: (plan.features || []).length + " features · " + ((plan.steps || []).length || "?") + " steps",

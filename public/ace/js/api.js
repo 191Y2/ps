@@ -1,5 +1,5 @@
 /* ============================================================
-   Ace — api.js · Z.ai API client (browser-direct, CORS-verified)
+   Ace — api.js · GLM API client (browser-direct, CORS-verified)
    • streaming chat with reasoning support
    • automatic model fallback (balance 1113 / unknown model / thinking 1210)
    • thinking-error auto-retry (models that can't disable thinking)
@@ -9,6 +9,9 @@
      (school-firewall-proof), with a 5-minute cache
    • deep research orchestration (sub-queries → parallel search
      → synthesized brief)
+   Chat completions go to open.bigmodel.cn when browser-direct
+   (CORS-open mirror of the Z.ai API — same key). api.z.ai's
+   preflight blocks browser fetches, so it's proxy-only.
    ============================================================ */
 "use strict";
 window.Ace = window.Ace || {};
@@ -28,7 +31,9 @@ window.Ace = window.Ace || {};
     } catch (e) { A.proxy = false; }
     return A.proxy;
   };
-  const endpoint = () => A.proxy ? "/api/zai/chat" : (Ace.API_BASE + Ace.API_PATH_CHAT);
+  /* chat completions URL is chosen per-attempt inside rawChat()
+     (proxy → same-origin /api/zai/chat; direct → open.bigmodel.cn
+     gateway rotation, see rawChat for why). */
 
   A.setKey = (k) => {
     A.key = String(k == null ? "" : k).trim()
@@ -65,9 +70,9 @@ window.Ace = window.Ace || {};
     if (e.kind === "rate") return "Z.ai servers are busy — give it a couple of seconds and try again.";
     if (e.kind === "unknown-model") return "That model isn't available on your key — Ace fell back to the free model.";
     if (e.kind === "network")
-      return "The connection to Z.ai dropped — long builds stream for 1-3 minutes and school wifi sometimes cuts in. Everything streamed so far is saved; hit Retry and Ace picks up where it left off.";
+      return "The connection to the GLM servers dropped — long builds stream for 1-3 minutes and school wifi sometimes cuts in. Everything streamed so far is saved; hit Retry and Ace picks up where it left off.";
     if (/Failed to fetch|NetworkError|network/i.test(e.message || ""))
-      return "Can't reach api.z.ai — check the school wifi/firewall or your connection.";
+      return "Can't reach the GLM API (open.bigmodel.cn) — check the wifi/firewall or your connection.";
     return e.message || "Something went wrong.";
   };
 
@@ -84,39 +89,81 @@ window.Ace = window.Ace || {};
 
   /* ---------- low-level request ----------
      Network resilience (school wifi cuts connections at random):
-     • 3 connection attempts with backoff before giving up
-     • 429 → single polite retry after 2.2s                              */
+     • PROXY mode: 3 connection attempts with backoff.
+     • DIRECT mode (GitHub Pages): the open.bigmodel.cn gateways answer
+       the CORS preflight only intermittently (~30-60% of requests,
+       varying over time), and a blocked preflight rejects as
+       "Failed to fetch" BEFORE any request is sent. Each attempt is a
+       fresh dice roll on a fresh gateway, and a successful preflight
+       is cached by the browser for 1h — so we try up to 12 times,
+       alternating gateways (last-good first), with short backoffs.
+       P(all 12 miss) at 30% odds ≈ 1.4%. A.warm() pre-heats this at
+       boot so the first real message usually skips the dice entirely.
+     • 429 → single polite retry after 2.2s on the gateway that
+       connected. */
+  let lastGoodBase = null; // gateway whose preflight last succeeded
   async function rawChat(payload, signal) {
     if (!A.key) { const e = new Error("No API key configured"); e.kind = "auth"; throw e; }
-    await A.detectProxy();
-    const url = endpoint();
-    const doFetch = () => fetch(url, {
+    const proxied = await A.detectProxy();
+    const bases = (Ace.API_ENDPOINTS && Ace.API_ENDPOINTS.length)
+      ? Ace.API_ENDPOINTS.slice() : [Ace.API_BASE];
+    if (lastGoodBase) { // sticky: try the gateway that worked last time first
+      const i = bases.indexOf(lastGoodBase);
+      if (i > 0) bases.splice(i, 1), bases.unshift(lastGoodBase);
+    }
+    const maxAttempts = proxied ? 3 : 12;
+    const mkUrl = (i) => proxied ? "/api/zai/chat" : (bases[i % bases.length] + Ace.API_PATH_CHAT);
+    const doFetch = (url) => fetch(url, {
       method: "POST",
       headers: { "Authorization": "Bearer " + A.key, "Content-Type": "application/json" },
       body: JSON.stringify(payload),
       signal
     });
     const netErr = () => Object.assign(
-      new Error("Can't reach api.z.ai — check the school wifi/firewall or your connection."), { kind: "network" });
+      new Error("Can't reach the GLM API — check the wifi/firewall or your connection."), { kind: "network" });
 
-    let res = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try { res = await doFetch(); break; }
-      catch (err) {
+    let res = null, usedUrl = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const url = mkUrl(attempt);
+      try {
+        res = await doFetch(url); usedUrl = url;
+        if (!proxied) lastGoodBase = bases[attempt % bases.length];
+        break;
+      } catch (err) {
         if (err.name === "AbortError") throw err;
-        if (attempt < 2) await sleep(900 * (attempt + 1), signal); // 0.9s, 1.8s backoff
+        if (attempt < maxAttempts - 1)
+          await sleep(proxied ? 900 * (attempt + 1) : Math.min(1200, 350 * (attempt + 1)), signal);
       }
     }
     if (res === null) throw netErr();
 
-    if (res.status === 429) { // brief backoff, single retry
+    if (res.status === 429) { // brief backoff, single retry on the gateway that connected
       await sleep(2200, signal);
-      try { res = await doFetch(); }
+      try { res = await doFetch(usedUrl); }
       catch (err) { if (err.name === "AbortError") throw err; throw netErr(); }
     }
     if (!res.ok) throw apiError(res.status, await res.text());
     return res;
   }
+
+  /* ---------- boot-time preflight warm-up ----------
+     On static hosts the browser must win the gateway's flaky CORS
+     preflight lottery at least once; after that win, the browser caches
+     the preflight for 1h and every call flies. This fires one tiny
+     (≈20-token) chat request right after boot so the lottery happens
+     while the user is still typing — their first real message then
+     connects instantly. Silent by design; once per page load. */
+  let warmed = false;
+  A.warm = async () => {
+    if (warmed || !A.key) return;
+    warmed = true;
+    try { await A.detectProxy(); } catch (e) { return; }
+    if (A.proxy) return; // same-origin proxy: no preflight lottery
+    A.chat({
+      model: "glm-4.5-flash", thinking: "disabled", maxTokens: 4, temperature: 0,
+      messages: [{ role: "user", content: "Reply with: ok" }]
+    }).catch(() => {});
+  };
 
   /* ---------- messages → API format (vision content parts) ---------- */
   A.toAPIMessages = (msgs) => msgs.map(m => {
@@ -342,19 +389,19 @@ window.Ace = window.Ace || {};
 
   /* ---- Best-effort: real web results (Bing RSS) + news (Google News RSS)
      via public CORS proxies. These public services come and go —
-     each try has a short timeout and fails silently. ---- */
+     each try has a short timeout and fails silently. (allorigins can
+     take 7-10s on a cold request, so the budget is 9s per proxy.) ---- */
   const CORS_PROXIES = [
     (u) => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u),
     (u) => "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(u)
   ];
   async function fetchViaProxy(url, ms) {
-    for (const wrap of CORS_PROXIES) {
-      try {
-        const r = await fetchTimeout(wrap(url), ms);
-        if (r.ok) { const t = await r.text(); if (t && t.length > 200) return t; }
-      } catch (e) { /* try next proxy */ }
-    }
-    return null;
+    // race both proxies — first valid body wins (bounded by the timeout),
+    // so a dead/slow proxy can't stretch the search phase
+    const attempts = CORS_PROXIES.map(wrap => fetchTimeout(wrap(url), ms || 9000)
+      .then(r => r.ok ? r.text() : null)
+      .then(t => (t && t.length > 200) ? t : Promise.reject(new Error("empty"))));
+    try { return await Promise.any(attempts); } catch (e) { return null; }
   }
   function parseRSS(xml, max) {
     const out = [];
@@ -372,13 +419,13 @@ window.Ace = window.Ace || {};
   }
   async function bingRefs(q) {
     const xml = await fetchViaProxy(
-      "https://www.bing.com/search?q=" + encodeURIComponent(q) + "&format=rss&count=10&mkt=en-US&setlang=en-US", 6000);
+      "https://www.bing.com/search?q=" + encodeURIComponent(q) + "&format=rss&count=10&mkt=en-US&setlang=en-US");
     if (!xml) return [];
     return parseRSS(xml, 6).map(r => Object.assign(r, { media: "Bing" }));
   }
   async function newsRefs(q) {
     const xml = await fetchViaProxy(
-      "https://news.google.com/rss/search?q=" + encodeURIComponent(q) + "&hl=en-US&gl=US&ceid=US:en", 6000);
+      "https://news.google.com/rss/search?q=" + encodeURIComponent(q) + "&hl=en-US&gl=US&ceid=US:en");
     if (!xml) return [];
     return parseRSS(xml, 5).map(r => Object.assign(r, { media: "Google News" }));
   }

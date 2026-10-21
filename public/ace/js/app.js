@@ -106,6 +106,7 @@ window.Ace = window.Ace || {};
       localStorage.setItem("ace:v1:key", k);
       UI.toast("Key saved — stored in your Firebase, not in the repo", "ok");
       hideSetup();
+      Ace.API.warm && Ace.API.warm(); // pre-warm the CORS preflight (static hosts)
     };
     keySec.append(keyRow, note("Stored privately in your Firestore (config/secrets) — it never ships in the GitHub repo. Get a free key at z.ai → API Keys."));
     b.append(keySec);
@@ -483,7 +484,13 @@ window.Ace = window.Ace || {};
     App.ready = true;
 
     if (!Ace.API.hasKey()) showSetup();
-    else $("input").focus();
+    else {
+      $("input").focus();
+      // silent preflight warm-up (static hosts only): wins the CORS
+      // preflight lottery while the user types, so the first message
+      // connects instantly (cached for 1h after one success)
+      Ace.API.warm && Ace.API.warm();
+    }
   }
 
   App.UI = UI;

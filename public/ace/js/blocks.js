@@ -468,11 +468,12 @@ window.Ace = window.Ace || {};
         choices.forEach((opt, oi) => {
           const o = el("button", "blk-opt" + (chosen === oi ? " sel" : ""),
             `<span class="blk-opt-mark"></span><span class="blk-opt-text">${mdInline(opt)}</span>`);
+          const mark = o.querySelector(".blk-opt-mark");
           o.onclick = () => { if (isAnswered) return; chosen = oi; wrap.querySelectorAll(".blk-opt").forEach(x => x.classList.remove("sel")); o.classList.add("sel"); };
           if (isAnswered) {
             const isRight = oi === q.answer;
-            if (isRight) o.classList.add("right");
-            else if (chosen === oi) o.classList.add("wrong");
+            if (isRight) { o.classList.add("right"); mark.innerHTML = Ace.ICON("check", 11); }
+            else if (chosen === oi) { o.classList.add("wrong"); mark.innerHTML = Ace.ICON("close", 11); }
             o.disabled = true;
           }
           body.append(o);
@@ -481,12 +482,13 @@ window.Ace = window.Ace || {};
         choices.forEach((opt, oi) => {
           const o = el("button", "blk-opt blk-opt-multi" + (chosen.includes(oi) ? " sel" : ""),
             `<span class="blk-opt-mark"></span><span class="blk-opt-text">${mdInline(opt)}</span>`);
+          const mark = o.querySelector(".blk-opt-mark");
           o.onclick = () => { if (isAnswered) return;
             chosen = chosen.includes(oi) ? chosen.filter(x => x !== oi) : chosen.concat([oi]);
             o.classList.toggle("sel"); };
           if (isAnswered) {
-            if ((q.answers || []).includes(oi)) o.classList.add("right");
-            else if (chosen.includes(oi)) o.classList.add("wrong");
+            if ((q.answers || []).includes(oi)) { o.classList.add("right"); mark.innerHTML = Ace.ICON("check", 11); }
+            else if (chosen.includes(oi)) { o.classList.add("wrong"); mark.innerHTML = Ace.ICON("close", 11); }
             o.disabled = true;
           }
           body.append(o);

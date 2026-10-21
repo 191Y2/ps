@@ -17,9 +17,28 @@ Ace.FIREBASE_CONFIG = {
   measurementId: "G-T4KXKQLREG"
 };
 
-/* ---------- Z.ai API ---------- */
-Ace.API_BASE = "https://api.z.ai/api/paas/v4";
+/* ---------- Z.ai / Zhipu GLM API ----------
+   BROWSER-DIRECT ENDPOINTS (used on GitHub Pages / any static host):
+   Zhipu's bigmodel.cn family. Same GLM models, same key format.
+   Endpoint selection was verified by direct probing (Oct 2026):
+   • api.z.ai — preflight NEVER returns CORS headers → unusable
+     browser-direct (0/15 probes). Server-side only (the preview proxy).
+   • open.bigmodel.cn — dual-stack (A + AAAA): its IPv4 path answers
+     the preflight ~30-50% of the time, its IPv6 path NEVER does.
+     Browsers pick a transport per origin and stick to it — on IPv6
+     every call dies as "Failed to fetch".
+   • bigmodel.cn — IPv4-ONLY + preflight passes 100% (16/16 probes),
+     same backend, same key → PRIMARY for static hosting.
+   The API client rotates the list below (last-good first) and retries
+   aggressively; a won preflight is cached by the browser for 1h. */
+Ace.API_BASE = "https://bigmodel.cn/api/paas/v4";
 Ace.API_PATH_CHAT = "/chat/completions";
+Ace.API_ENDPOINTS = [
+  "https://bigmodel.cn/api/paas/v4",         // IPv4-only gateway — preflight 100%
+  "https://bigmodel.cn/api/coding/paas/v4",  // coding gateway — same key + models, preflight 100%
+  "https://open.bigmodel.cn/api/paas/v4",    // dual-stack fallback (IPv4 dice roll)
+  "https://open.bigmodel.cn/api/coding/paas/v4"
+];
 
 /* Model registry — verified 2026-10 against the live API.
    free: works on a free Z.ai key (no balance needed).
@@ -72,7 +91,7 @@ Ace.BLOCK_TYPES = ["quiz", "flashcards", "scorecard", "stats", "compare", "steps
                    "timeline", "terms", "table", "progress"];
 
 /* ---------- Misc ---------- */
-Ace.VERSION = "1.0.0";
+Ace.VERSION = "1.1.7";
 Ace.APP_NAME = "Ace";
 Ace.MAX_IMAGES = 4;          // per message
 Ace.IMG_MAX_DIM = 1024;      // client-side downscale

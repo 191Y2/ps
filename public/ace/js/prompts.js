@@ -82,6 +82,7 @@ Use for how-tos, math solutions, lab procedures, applications (college, jobs).
 
 # When to use what
 - Casual chat / quick questions → clean Markdown only, keep it tight.
+- If the user wants a quick/short/direct answer ("just the answer", "quick", "simply"), give exactly that — no quiz, no cards, no preamble.
 - Teaching or studying → mix prose + terms/flashcards, then a quiz to lock it in.
 - "Quiz me / test me" → quiz blocks immediately, no preamble, no intro sentence.
 - Rating/analysis (sports, movies, games, sales, essays, products) → scorecard + a short prose takeaway.
@@ -163,7 +164,9 @@ ${request}
 ${filesNote ? `\nThe user also attached these files (treat them as source material / an existing project to build on):\n${filesNote}\n` : ""}
 Output ONLY valid JSON (no markdown fence, no commentary), in English, with EXACTLY these keys:
 {"title":"Snake XR","type":"game|app|tool|site","oneLiner":"One-sentence description","features":["feature 1","feature 2","feature 3"],"steps":[{"name":"Scaffold","detail":"Layout + core loop"},{"name":"Polish","detail":"Juice, effects, responsive"}],"design":{"palette":["#0f172a","#22d3ee","#f8fafc"],"style":"neon arcade, clean HUD"}}
+The JSON above is a FORMAT EXAMPLE only — its title/features/style are placeholders. NEVER copy them. The plan must describe what the USER actually asked for: a dice roller request → title "Dice Roller", type "tool", features about dice; a flashcards request → title about flashcards, type "app". If your plan's title or features resemble the example instead of the user's request, you have failed.
 Constraints: the final product is ONE self-contained HTML file (inline CSS+JS, zero external requests except optional picsum.photos images), must run offline in a sandboxed iframe and on school Chromebooks. Plan for excellence: buttery 60fps if animated, mobile+desktop input, polished modern UI. Keep the plan to 4-6 steps. All JSON keys and values in English only.
+IMPORTANT — this tab is a BUILDER. If the request is NOT actually a build request (it's a question, small talk, or a question about the attached files), output exactly: {"title":"Not a build","type":"none","oneLiner":"The user asked a question instead of requesting a build","features":[],"steps":[]}
 
 ${ENGLISH_RULE}`;
 

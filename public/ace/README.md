@@ -32,13 +32,16 @@ Powered by **GLM models from Z.ai** — with real memory, live web search that a
 ## 🚀 Deploy to GitHub Pages (~4 minutes)
 
 1. **Create a repo** on GitHub (public or private — GitHub Pages on free plans needs public, or use Pro).
-2. **Upload the contents of this folder** (the `ace/` folder: `index.html`, `css/`, `js/`) to the repo root — drag & drop on github.com works, or:
+2. **Upload the contents of this folder** (the `ace/` folder: `index.html`, `css/`, `js/`, `.nojekyll`) to the repo root — drag & drop on github.com works, or:
    ```bash
    git init && git add . && git commit -m "Ace" && git push https://github.com/YOU/YOUR-REPO.git main
    ```
+   > `.nojekyll` is included — it tells GitHub Pages to serve the files exactly as-is instead of running them through the Jekyll site builder.
 3. **Turn on Pages:** repo → Settings → Pages → Source: *Deploy from a branch* → Branch: `main` / `(root)` → Save.
 4. Wait ~1 minute → your app is live at `https://YOU.github.io/REPO-NAME/`.
 
+> ⚠️ **Deploy only this folder.** The repo must not contain a `package.json` / `node_modules` / Next.js `src/` — GitHub Pages serves static files only; anything server-side simply won't run. This folder is the entire app: 100% static, no build step, no Node.
+>
 > Nothing in the repo contains your API key. It gets stored in your Firebase only.
 
 ---
@@ -83,12 +86,14 @@ This makes chats/memories sync across devices and shares your API key with anyon
 - **Free tier (verified Oct 2026):** `glm-4.5-flash` (text — fast, thinks by default) and `glm-4.6v-flash` (vision). Ace routes everything to these by default so it **works with zero balance**.
 - Flagship models (`glm-5.3`, `glm-5.2`, `glm-4.7`…) need credit or a resource package on your Z.ai account. If you see **error 1113**, Ace falls back to the free Flash model automatically. Top up at z.ai → Billing to unlock flagship quality for Work mode and Think mode.
 - The Z.ai server-side web-search tool also requires balance on free keys — that's why Ace grounds web answers in **Wikipedia + DuckDuckGo references by default** (always free, always honest). Add balance and full web search activates on its own.
+- Your key works on both `api.z.ai` and `open.bigmodel.cn` — same account, same models. Ace calls `open.bigmodel.cn` from the browser because it's the one that allows cross-origin requests from static sites.
 
 ---
 
 ## 🏫 School / blocked-network notes
 
-- The whole app is static HTML/CSS/JS from one folder — same as any website. It talks to `api.z.ai` (CORS-enabled, verified) and `en.wikipedia.org` / `api.duckduckgo.com` for references, plus `gstatic.com` for Firebase.
+- The whole app is static HTML/CSS/JS from one folder — same as any website. Chat completions go to `open.bigmodel.cn` (Zhipu's open platform — the CORS-enabled mirror of the Z.ai API; the same key works on both). Web references come from `en.wikipedia.org` / `api.duckduckgo.com` / Bing + Google News via public CORS proxies, plus `gstatic.com` for Firebase. **No same-origin server of any kind is required** — that's exactly what makes GitHub Pages work.
+- **Why `open.bigmodel.cn` and not `api.z.ai`?** api.z.ai's gateway answers the browser's CORS preflight (OPTIONS) without the `Access-Control-Allow-Origin` header, so browsers block every direct call — the app said "Can't reach api.z.ai" no matter what. `open.bigmodel.cn` runs the same GLM models, accepts the same API key, and sends full CORS headers on both the preflight and the response (verified: non-stream, stream and vision all pass from a browser context). On the bundled preview host the app still prefers the same-origin `/api/zai/*` proxy (servers have no CORS limits), which is why the bug only appeared on GitHub Pages.
 - If the school network blocks a domain, Ace degrades gracefully: no Firebase → local storage; no references → the AI says when it couldn't verify instead of guessing; no API → clear error with a retry.
 - Works on managed Chromebooks (Chrome 89+), no installs.
 - **Long builds are drop-proof**: Agent builds stream for 1–3 minutes, and school wifi sometimes cuts long connections. If that happens, Ace keeps everything that already streamed and continues the file from where it stopped (you'll see "connection hiccup, resuming" in the trace) — the build survives instead of failing. Connection attempts also auto-retry 3× with backoff before any error is shown.
@@ -116,6 +121,7 @@ This makes chats/memories sync across devices and shares your API key with anyon
 
 ```
 ├── index.html        # app shell
+├── .nojekyll         # tells GitHub Pages: serve files as-is (no Jekyll)
 ├── css/style.css     # design system (dark, minimalist)
 ├── css/blocks.css    # AI UI component styles
 └── js/
